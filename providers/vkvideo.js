@@ -1,5 +1,5 @@
 // ============================================================
-//  vkvideo v1.0.0 — Nuvio scraper (vkvideo.ru, kullanıcı / kanal / topluluk yüklemeleri)
+//  vkvideo v1.1.0 — Nuvio scraper (vkvideo.ru, kullanıcı / kanal / topluluk yüklemeleri)
 //  Akış: TMDB bilgisi -> VK Video araması (sayfalı) + arama motorları (Google / Yandex / Bing ...)
 //        + kanal / topluluk video listeleri -> aday eleme/puanlama (okru / mailru ile aynı)
 //        -> video bağlantıları (mp4 / HLS / DASH)
@@ -19,12 +19,14 @@ var AYAR = {
   // true iken akış çıkmazsa neden çıkmadığını yazan "DEBUG" satırları görünür. Her şey çalışınca false yap.
   DEBUG_MODU: false,
   MIN_SURE: 1200,       // sn: bundan kısa videolar (fragman/klip/kesit) hariç; süre uyumu ARANMAZ. 0 yaparsan hiç eleme olmaz
-  MAX_ADAY: 10,         // en fazla kaç kesin Türkçe aday video için kaynak çekilsin
+  MAX_ADAY: 12,         // en fazla kaç kesin Türkçe aday video için kaynak çekilsin
   MAX_BELIRSIZ: 6,      // dili belli olmayan (etiketsiz) en fazla kaç aday
   BELIRSIZ_GOSTER: true,  // dili doğrulanamayan adaylar "Dil ?" etiketiyle en sona eklensin
-  MAX_SORGU: 10,        // VK Video'da en fazla kaç arama yapılsın (öncelik sırasıyla: "ad Türkçe Dublaj", "ad TR Dublaj", ...)
-  SORGU_SAYFA: 2,       // her aramada sitedeki gibi aşağı indikçe en fazla kaç sayfa (sayfa başı ~30 video) okunsun
+  MAX_SORGU: 12,        // VK Video'da en fazla kaç arama yapılsın (öncelik sırasıyla: "ad Türkçe Dublaj", "ad TR Dublaj", ...)
+  SORGU_SAYFA: 3,       // her aramada sitedeki gibi aşağı indikçe en fazla kaç sayfa (sayfa başı ~30 video) okunsun
   ONEKLER: [],
+  DOGRULA: true,        // bağlantı gerçekten açılıyor mu denenir; oynatıcıya hangi başlıkların (UA/Referer/Origin) kabul edildiği verilir, ölü mp4'ler sona atılır
+  SURE_PARMAK_IZ: true, // hiçbir aday adla eşleşmediyse: süresi TMDB süresiyle ±%1.2 tutan, Türkçe dublaj etiketli TEK video varsa o eklenir ("TR Süre")
   // Arama motorları (Google / Yandex / Yandex Video / Bing / DuckDuckGo ...): "rambo tr vkvideo.ru" tarzı aramalardan VK video numaraları toplanır
   ARAMA_MOTORU: true,
   MOTOR_SORGU: 10,      // arama motorlarına en fazla kaç sorgu gitsin
@@ -32,8 +34,8 @@ var AYAR = {
   MOTOR_ADAY: 20,       // arama motorundan gelen en fazla kaç video doğrulansın
   // Kanallar / topluluklar: videolarının listesi de taranır.
   KANAL_ARA: true,      // arama sonuçlarında çıkan film/dublaj adlı kanallar ve Türkçe dublaj bulunan kanallar otomatik taransın
-  MAX_KANAL: 4,         // otomatik taranacak en fazla kanal
-  KANAL_SAYFA: 3,       // kanal başına en fazla kaç sayfa (sayfa başı 100 video)
+  MAX_KANAL: 8,         // otomatik taranacak en fazla kanal
+  KANAL_SAYFA: 5,       // kanal başına en fazla kaç sayfa (sayfa başı 100 video)
   KANAL_ADI: 'film|dublaj|izle|sinema|movie|cinema|yerli|turk',   // kanal adında bunlardan biri geçerse otomatik taranır
   // Elle kanal / topluluk listesi (her aramada taranır, bu kanalların videoları Türkçe kabul edilir).
   // Biçim: 'club123456' | 'https://vk.com/club123456' | '-123456' | '123456' (hepsi topluluk), kişisel hesap: 'id123456'
@@ -46,8 +48,8 @@ var AYAR = {
   PARALEL: 6,           // aynı anda en fazla kaç arama/liste isteği
   ARAMA_SURESI: 8000,   // ms: arama aşaması üst sınırı
   KANAL_SURESI: 4000,   // ms: otomatik kanal taraması üst sınırı
-  KAYNAK_SURESI: 5000,  // ms: video bağlantılarının çekilmesi üst sınırı
-  GENEL_SURE: 26000     // ms: dolunca o ana kadar bulunan akışlar VERİLİR (boş dönmez)
+  KAYNAK_SURESI: 7000,  // ms: video bağlantılarının çekilmesi üst sınırı
+  GENEL_SURE: 32000     // ms: dolunca o ana kadar bulunan akışlar VERİLİR (boş dönmez)
 };
 
 // Türkçe adı TMDB'de görünmeyen / farklı yazılan filmler: orijinal ad (harf-rakam, küçük) -> Türkçe adlar
@@ -457,9 +459,15 @@ function getRaw(url, headers, label, opt) {
     if (opt.method) init.method = opt.method;
     if (opt.body) init.body = opt.body;
     return withTimeout(fetch(url, init), tmo).then(function (res) {
+      var ct = '';
+      try { ct = (res.headers && res.headers.get && res.headers.get('content-type')) || ''; } catch (e) {}
+      if (opt.noBody) {                       // sadece durum kodu / içerik türü (büyük dosyayı indirme)
+        try { if (res.body && res.body.cancel) res.body.cancel(); } catch (e) {}
+        return { status: res.status, ok: res.ok, text: '', url: res.url || '', ct: ct };
+      }
       return withTimeout(res.text(), tmo).then(
-        function (t) { return { status: res.status, ok: res.ok, text: t || '', url: res.url || '' }; },
-        function () { return { status: res.status, ok: false, text: '', url: res.url || '' }; }
+        function (t) { return { status: res.status, ok: res.ok, text: t || '', url: res.url || '', ct: ct }; },
+        function () { return { status: res.status, ok: false, text: '', url: res.url || '', ct: ct }; }
       );
     }).catch(function (e) {
       return { status: 0, ok: false, text: '', err: (e && e.message) || 'hata' };
@@ -683,13 +691,17 @@ function scanChannel(owner, sink, trusted) {
 // ---------------- Video bağlantıları ----------------
 
 function isImage(u) {
+  if (u.indexOf('.mp4') > -1 || u.indexOf('.m3u8') > -1 || u.indexOf('.mpd') > -1) return false;   // psv4.userapi.com/.../video.360.mp4 gibi video adresleri
   return u.indexOf('.jpg') > -1 || u.indexOf('.jpeg') > -1 || u.indexOf('.png') > -1 || u.indexOf('.webp') > -1 ||
     u.indexOf('getVideoPreview') > -1 || u.indexOf('userapi.com') > -1 || u.indexOf('vkuserphoto') > -1;
 }
 function isMedia(u) {
   if (isImage(u)) return false;
-  if (u.indexOf('video_ext.php') > -1 || u.indexOf('vkvideo.ru') > -1 || u.indexOf('vk.com') > -1 || u.indexOf('vk.ru') > -1) return false;
-  return u.indexOf('.m3u8') > -1 || u.indexOf('.mpd') > -1 || u.indexOf('.mp4') > -1 || u.indexOf('okcdn.ru') > -1;
+  if (u.indexOf('video_ext.php') > -1) return false;
+  var host = (u.match(/^https?:\/\/([^\/?#]+)/i) || [])[1] || '';
+  if (/(^|\.)(vkvideo\.ru|vk\.com|vk\.ru|m\.vk\.com)$/i.test(host)) return false;
+  return u.indexOf('.m3u8') > -1 || u.indexOf('.mpd') > -1 || u.indexOf('.mp4') > -1 || u.indexOf('okcdn.ru') > -1 ||
+    /(mycdn\.me|vkuservideo\.(net|ru)|vkvd\d*\.)/i.test(host) || /[?&]type=\d/.test(u);
 }
 function cleanUrl(u) { return String(u || '').replace(/\\\//g, '/').replace(/\\u0026/g, '&').replace(/&amp;/g, '&'); }
 
@@ -713,54 +725,115 @@ function qualityOf(hint, u) {
   return 0;
 }
 
-// Bir videonun oynatma bağlantıları: [{ hint, url }]
+// Bir videonun oynatma bağlantıları: [{ hint, url, src }]
+// Kaynaklar: video.getByIds (+ video.get yedeği), video.getForPlay, video.getPlayerConfig VE oynatıcı (embed) sayfası.
+// Hepsi birleştirilir: API bazı videolarda sadece düşük kaliteyi verirken embed sayfasında 1080p/HLS/DASH bulunabilir.
 function getPlay(item) {
   var key = item.id, parts = key.split('_'), oid = parts[0] || '', vid = parts[1] || '', ak = parts[2] || '';
-  var links = [], seen = {};
-  function add(node) {
+  var links = [], seen = {}, gotItem = false;
+  function add(node, src) {
     var list = [];
     scanUrls(node, '', list);
     list.forEach(function (p) {
       var u = cleanUrl(p[1]);
-      if (isMedia(u) && !seen[u]) { seen[u] = 1; links.push({ hint: p[0], url: u }); }
+      if (isMedia(u) && !seen[u]) { seen[u] = 1; links.push({ hint: p[0], url: u, src: src }); }
     });
   }
-  var playParams = { videos: key, video: key, owner_id: oid, video_id: vid, id: vid };
-  var jobs = [
-    api('video.getByIds', { videos: key }, true).then(function (r) {
-      var acc = newAcc();
-      collectVideos(r, acc);
-      add(acc.list.length ? acc.list[0] : r);
-      if (acc.list.length && !item.dur) item.dur = parseInt(acc.list[0].duration, 10) || 0;
-      if (acc.list.length && acc.list[0].player) item.player = String(acc.list[0].player);
-    }, function (e) { dbg.push('getByIds ' + key + ' ' + ((e && e.message) || '')); }),
-    api('video.getForPlay', playParams, true).then(add, function (e) { dbg.push('getForPlay ' + ((e && e.message) || '')); }),
-    api('video.getPlayerConfig', playParams, true).then(add, function (e) { dbg.push('getPlayerConfig ' + ((e && e.message) || '')); })
-  ];
-  return Promise.all(jobs).then(function () {
-    if (links.length) return links;
-    // yedek: oynatıcı (embed) sayfası
-    var player = item.player || (AYAR.SITE + '/video_ext.php?oid=' + oid + '&id=' + vid + (ak ? '&hash=' + ak : ''));
-    return getRaw(player, vkHeaders({ 'Accept': 'text/html,*/*' }), 'W', { prio: true, timeout: 7000 }).then(function (r) {
-      var rx = /"(hls|dash_sep|dash_uni|url\d+|mp4_\d+)"\s*:\s*"(http[^"]+)"/g, m;
+  function fromItems(r) {
+    var acc = newAcc();
+    collectVideos(r, acc);
+    if (acc.list.length) {
+      gotItem = true;
+      var o = acc.list[0];
+      add(o, 'api');
+      if (!item.dur) item.dur = parseInt(o.duration, 10) || 0;
+      if (o.player) item.player = String(o.player);
+    } else add(r, 'api');
+  }
+  function embedOne(u) {
+    return getRaw(u, vkHeaders({ 'Accept': 'text/html,*/*' }), 'W', { prio: true, timeout: 7000 }).then(function (r) {
+      var rx = /"(hls[a-z_]*|dash_[a-z_]+|url\d+|mp4_\d+)"\s*:\s*"(https?:[^"]+)"/g, m;
       while (r.ok && (m = rx.exec(r.text)) !== null) {
-        var u = cleanUrl(m[2]);
-        if (!seen[u]) { seen[u] = 1; links.push({ hint: m[1], url: u }); }
+        var cu = cleanUrl(m[2]);
+        if (isMedia(cu) && !seen[cu]) { seen[cu] = 1; links.push({ hint: m[1], url: cu, src: 'embed' }); }
       }
-      return links;
     });
+  }
+  function fetchEmbed() {
+    var std = AYAR.SITE + '/video_ext.php?oid=' + oid + '&id=' + vid + (ak ? '&hash=' + ak : '');
+    var urls = [item.player || std];
+    if (item.player && item.player !== std) urls.push(std);
+    return Promise.all(urls.map(function (u) { return embedOne(u).catch(noop); }));
+  }
+  var playParams = { videos: key, video: key, owner_id: oid, video_id: vid, id: vid };
+  var main = api('video.getByIds', { videos: key }, true).then(fromItems, function (e) { dbg.push('getByIds ' + key + ' ' + ((e && e.message) || '')); })
+    .then(function () {
+      if (gotItem) return null;
+      return api('video.get', { videos: key }, true).then(fromItems, function (e) { dbg.push('video.get ' + key + ' ' + ((e && e.message) || '')); });
+    })
+    .then(fetchEmbed);
+  return Promise.all([
+    main,
+    api('video.getForPlay', playParams, true).then(function (r) { add(r, 'play'); }, function (e) { dbg.push('getForPlay ' + ((e && e.message) || '')); }),
+    api('video.getPlayerConfig', playParams, true).then(function (r) { add(r, 'play'); }, function (e) { dbg.push('getPlayerConfig ' + ((e && e.message) || '')); })
+  ]).then(function () {
+    if (AYAR.DEBUG_MODU) dbg.push('links ' + key + ': ' + links.map(function (l) { return l.src + ':' + l.hint + '@' + String(l.url).replace(/^https?:\/\//, '').split('/')[0].slice(0, 22); }).join(' ').slice(0, 300));
+    return links;
   });
 }
 
-function expandHls(url) {
-  var headers = { 'User-Agent': UA_VK, 'Referer': AYAR.SITE + '/', 'Origin': AYAR.SITE };
-  return getRaw(url, headers, '', { timeout: 3000, prio: true }).then(function (r) {
+function isHlsLink(l) { return l.url.indexOf('.m3u8') > -1 || /hls/i.test(String(l.hint || '')); }
+function isDashLink(l) { return l.url.indexOf('.mpd') > -1 || /dash/i.test(String(l.hint || '')); }
+function isMp4Link(l) { return !isHlsLink(l) && !isDashLink(l); }
+
+// Oynatıcıya verilecek başlık yöntemleri (CDN bazen UA / Referer / Origin ister, bazen de başlık varken reddeder): hangisi çalışıyorsa o kullanılır
+var HDR_VARIANTS = [
+  function () { return { 'User-Agent': UA_VK, 'Referer': AYAR.SITE + '/', 'Origin': AYAR.SITE }; },
+  function () { return { 'User-Agent': ANDROID_UA, 'Referer': AYAR.SITE + '/', 'Origin': AYAR.SITE }; },
+  function () { return { 'User-Agent': UA_VK }; },
+  function () { return {}; }
+];
+
+function probeState(r, isHls) {                      // 1 = çalışıyor, -1 = çalışmıyor, 0 = belirsiz (ağ hatası)
+  if (!r || !r.status) return 0;
+  if (isHls) return (r.ok && /^\s*#EXTM3U/.test(r.text || '')) ? 1 : -1;
+  if (r.status === 200 || r.status === 206) return /text\/html|json/i.test(r.ct || '') ? -1 : 1;
+  return -1;
+}
+
+// Bağlantıyı gerçekten dener (Range ile 2 bayt): hangi başlık takımı kabul ediliyor, mp4 ölü mü?
+function verifyItem(item, links) {
+  var pl = { links: links, hlsVars: [], headers: HDR_VARIANTS[0](), mp4Dead: false };
+  if (!AYAR.DOGRULA || !links.length) return Promise.resolve(pl);
+  var mp4 = links.filter(isMp4Link)[0] || null;
+  var target = mp4 || links.filter(isHlsLink)[0] || null;
+  if (!target) return Promise.resolve(pl);
+  var isH = !mp4;
+  var tests = HDR_VARIANTS.map(function (mk, i) {
+    var ph = mk();
+    if (!isH) ph['Range'] = 'bytes=0-1';
+    return getRaw(target.url, ph, '', { timeout: 4000, prio: true, noBody: !isH }).then(function (r) {
+      return { i: i, v: probeState(r, isH), st: r.status || r.err || '?' };
+    });
+  });
+  return Promise.all(tests).then(function (rs) {
+    var okR = null, unknown = false;
+    rs.forEach(function (x) { if (x.v === 1 && !okR) okR = x; if (x.v === 0) unknown = true; });
+    dbg.push('probe ' + item.id + ' ' + (isH ? 'hls' : 'mp4') + ' ' + rs.map(function (x) { return 'V' + x.i + ':' + x.st; }).join(' '));
+    if (okR) pl.headers = HDR_VARIANTS[okR.i]();
+    else if (!unknown && !isH) pl.mp4Dead = true;
+    return pl;
+  });
+}
+
+function expandHls(url, headers) {
+  return getRaw(url, headers || HDR_VARIANTS[0](), '', { timeout: 3000, prio: true }).then(function (r) {
     return r.ok ? parseHlsMaster(r.text, url) : [];
   });
 }
 
 function makeStreams(item, ranked, pl) {
-  var headers = { 'User-Agent': UA_VK, 'Referer': AYAR.SITE + '/', 'Origin': AYAR.SITE };
+  var headers = pl.headers || HDR_VARIANTS[0]();
   var parts = [AYAR.EKLENTI_ADI, ranked.lang], dur = fmtDur(item.dur);
   function lbl(extra) {
     var a = parts.concat([extra]);
@@ -773,22 +846,26 @@ function makeStreams(item, ranked, pl) {
     var u = l.url, hint = String(l.hint || '');
     if (seen[u]) return;
     seen[u] = 1;
-    if (u.indexOf('.m3u8') > -1 || /hls/i.test(hint)) {
+    if (isHlsLink(l)) {
       extras.push({ name: AYAR.EKLENTI_ADI + ' - ' + ranked.lang + ' HLS', title: lbl('HLS Auto'), url: u, quality: 'Auto', headers: headers, provider: PROVIDER_ID });
       return;
     }
-    if (u.indexOf('.mpd') > -1 || /dash/i.test(hint)) {
+    if (isDashLink(l)) {
       extras.push({ name: AYAR.EKLENTI_ADI + ' - ' + ranked.lang + ' DASH', title: lbl('DASH Auto'), url: u, quality: 'Auto', headers: headers, provider: PROVIDER_ID });
       return;
     }
     var q = qualityOf(hint, u), key = q ? q + 'p' : 'Auto';
-    if (q) mp4h[q] = 1;
-    mp4.push({ name: AYAR.EKLENTI_ADI + ' - ' + ranked.lang + ' ' + key, title: lbl(key), url: u, quality: key, type: 'mp4', headers: headers, provider: PROVIDER_ID });
+    var tag = (q && mp4h[q]) ? ' #2' : '';
+    if (q) mp4h[q] = (mp4h[q] || 0) + 1;
+    var s = { name: AYAR.EKLENTI_ADI + ' - ' + ranked.lang + ' ' + key + tag, title: lbl(key + tag + (pl.mp4Dead ? ' (test başarısız)' : '')), url: u, quality: key, type: 'mp4', headers: headers, provider: PROVIDER_ID };
+    if (pl.mp4Dead) s._dead = true;
+    mp4.push(s);
   });
-  // HLS ana listesindeki (mp4 olarak verilmeyen) çözünürlükler
+  // HLS ana listesindeki (mp4 olarak verilmeyen) çözünürlükler: 1080p ve altı hepsi
   (pl.hlsVars || []).forEach(function (v) {
     if (!v.h || mp4h[v.h] || seen[v.url]) return;
     seen[v.url] = 1;
+    mp4h[v.h] = 1;
     mp4.push({ name: AYAR.EKLENTI_ADI + ' - ' + ranked.lang + ' ' + v.h + 'p', title: lbl(v.h + 'p HLS'), url: v.url, quality: v.h + 'p', headers: headers, provider: PROVIDER_ID });
   });
   mp4.sort(function (a, b) { return heightOf(b.quality) - heightOf(a.quality); });
@@ -1473,13 +1550,14 @@ function debugStream(msg) {
 }
 
 // VK Video'da en çok işe yarayan sorgular önce: "ad Türkçe Dublaj", "ad TR Dublaj", "ad yıl TR" ...
-function buildQueriesVk(imdb, year, titles, trTitles) {
+function buildQueriesVk(imdb, year, titles, trTitles, extra) {
   var y = year ? ' ' + year : '', front = [];
   var names = uniq([(trTitles || [])[0], (titles || [])[0], (trTitles || [])[1]].filter(Boolean));
   names.forEach(function (n) { front.push(n + ' Türkçe Dublaj'); });
   names.forEach(function (n) { front.push(n + ' TR Dublaj'); });
   names.slice(0, 2).forEach(function (n) { front.push(n + y + ' TR'); });
   names.slice(0, 2).forEach(function (n) { front.push(n + ' izle'); });
+  (extra || []).forEach(function (n) { front.push(n + ' Türkçe Dublaj'); front.push(n + y); });   // TMDB'deki diğer ülke adları
   var rest = buildQueries(imdb, year, titles, trTitles);
   return uniq(front.concat(rest).map(function (q) { return String(q || '').replace(/\s+/g, ' ').trim(); })
     .filter(function (q) { return q.length >= 3; })).slice(0, AYAR.MAX_SORGU);
@@ -1488,7 +1566,7 @@ function buildQueriesVk(imdb, year, titles, trTitles) {
 function getStreamsInner(tmdbId, mediaType, holder) {
   holder = holder || { partial: [], pu: {} };
   if (mediaType !== 'movie') return Promise.resolve([]);
-  dbg = ['vkvideo v1.0.0'];
+  dbg = ['vkvideo v1.1.0'];
   var T0 = Date.now();
   var base = 'https://api.themoviedb.org/3/movie/' + tmdbId + '?api_key=' + TMDB_KEY;
 
@@ -1514,13 +1592,23 @@ function getStreamsInner(tmdbId, mediaType, holder) {
     } catch (e) {}
     var titles = uniq([info.original_title, en.title, info.title]);
     var aliasTr = aliasNames([info.original_title, en.title, info.title]);   // bilinen Türkçe adlar (Zor Ölüm, Mumya...)
-    var wants = uniq(titles.concat(aliasTr).concat(alts.slice(0, 8)));
+    var allAlt = [];                                   // TMDB'deki TÜM ülkelerin Latin harfli adları (yükleyen hangisini yazdıysa bulunsun)
+    try {
+      ((info.alternative_titles && info.alternative_titles.titles) || []).forEach(function (a) {
+        if (a && a.title && !/[^\u0000-\u024F]/.test(a.title)) allAlt.push(a.title);
+      });
+    } catch (e) {}
+    allAlt = uniq(allAlt);
+    var wants = uniq(titles.concat(aliasTr).concat(alts.slice(0, 8)).concat(allAlt.slice(0, 14)));
     var nonTr = [norm(info.original_title), norm(en.title)];
     var trWants = uniq(aliasTr.concat([info.title]).concat(trAlts)).filter(function (t) { return t && nonTr.indexOf(norm(t)) === -1; });
     var ctx = { imdb: info.imdb_id || '', year: year, runtime: info.runtime || en.runtime || 0, wants: wants, trWants: trWants, trFilm: info.original_language === 'tr' };
     dbg.push('film ' + (info.original_title || info.title) + ' ' + year + ' ' + (ctx.imdb || '-') + ' ' + ctx.runtime + 'dk');
 
-    var queries = buildQueriesVk(ctx.imdb, year, titles, trWants);
+    var known = {};
+    titles.concat(trWants).forEach(function (t) { known[norm(t)] = 1; });
+    var extraQ = allAlt.filter(function (t) { return !known[norm(t)] && norm(t).length >= 4; }).slice(0, 3);
+    var queries = buildQueriesVk(ctx.imdb, year, titles, trWants, extraQ);
     ctx.manuel = [];
     ctx.engel = [];
     (AYAR.ENGEL || []).forEach(function (e) {
@@ -1573,7 +1661,7 @@ function getStreamsInner(tmdbId, mediaType, holder) {
           if (r) ranked.push({ item: it, r: r });
           else {
             rejected++;
-            if (AYAR.DEBUG_MODU && rejected <= 4 && dbg.length < 70) dbg.push('red ' + it.title.slice(0, 38) + ' ' + fmtDur(it.dur));
+            if (AYAR.DEBUG_MODU && dbg.length < 90 && (rejected <= 4 || fuzzyHit(analyze(it.title), ctx.wants))) dbg.push('red ' + it.title.slice(0, 40) + ' ' + fmtDur(it.dur));
           }
         });
         ranked.sort(function (a, b) { return (a.r.tier - b.r.tier) || (b.r.score - a.r.score); });
@@ -1624,7 +1712,28 @@ function getStreamsInner(tmdbId, mediaType, holder) {
         });
       }
 
+      // Hiçbir aday adla eşleşmediyse: süre parmak izi (Türkçe dublaj etiketli, süresi TMDB ile ±%1.2 tutan TEK video)
+      function sureParmakIzi() {
+        if (!AYAR.SURE_PARMAK_IZ || !ctx.runtime) return;
+        if (ranked.some(function (x) { return !x.r.maybe; })) return;
+        var have = {};
+        ranked.forEach(function (x) { have[x.item.id] = 1; });
+        var cands = all.filter(function (it) {
+          if (have[it.id] || !it.dur || it.dur < (AYAR.MIN_SURE || 0)) return false;
+          if (Math.abs(it.dur / (ctx.runtime * 60) - 1) > 0.012) return false;
+          if (/[\u0400-\u04FF]/.test(it.title)) return false;
+          var inf = analyze(it.title), li = langInfo(inf);
+          if (!(li.ok && li.tier === 0)) return false;
+          if (inf.imdb && ctx.imdb && inf.imdb !== ctx.imdb) return false;
+          if (inf.years.length && ctx.year && !inf.years.some(function (y) { return Math.abs(y - ctx.year) <= 1; })) return false;
+          return true;
+        });
+        dbg.push('sure parmak izi aday ' + cands.length);
+        if (cands.length === 1) ranked.push({ item: cands[0], r: { score: 35, info: analyze(cands[0].title), lang: 'TR Süre', tier: 1, maybe: false } });
+      }
+
       return motorDogrula().then(kanalGenislet).then(function () {
+        sureParmakIzi();
         if (!ranked.length) return debugStream('uygun video yok: ' + (info.title || info.original_title) + ' ' + year);
 
         var sure = ranked.filter(function (x) { return !x.r.maybe; }).slice(0, AYAR.MAX_ADAY);
@@ -1632,31 +1741,34 @@ function getStreamsInner(tmdbId, mediaType, holder) {
         var top = sure.concat(unsure);
         var res = top.map(function () { return null; }), hjobs = [];
         var ljobs = top.map(function (x, i) {
-          return getPlay(x.item).then(function (links) {
-            var pl = { links: links, hlsVars: [] };
+          return getPlay(x.item).then(function (links) { return verifyItem(x.item, links); }).then(function (pl) {
             res[i] = pl;
-            if (!x.r.maybe) {                                           // ilk hazır kaynaklar: süre dolarsa en azından bunlar verilsin
+            if (!x.r.maybe && !pl.mp4Dead) {                            // ilk hazır kaynaklar: süre dolarsa en azından bunlar verilsin
               try {
                 makeStreams(x.item, x.r, pl).forEach(function (s) { if (!holder.pu[s.url]) { holder.pu[s.url] = 1; holder.partial.push(s); } });
               } catch (e) {}
             }
             var hl = null;
-            links.forEach(function (l) { if (!hl && l.url.indexOf('.m3u8') > -1) hl = l; });
-            if (hl) hjobs.push(expandHls(hl.url).then(function (v) { pl.hlsVars = v; }, noop));
+            pl.links.forEach(function (l) { if (!hl && isHlsLink(l)) hl = l; });
+            if (hl) hjobs.push(expandHls(hl.url, pl.headers).then(function (v) { pl.hlsVars = v; }, noop));
           }, function (e) { dbg.push('play hata ' + x.item.id + ' ' + ((e && e.message) || '')); });
         });
         return waitWithin(ljobs, AYAR.KAYNAK_SURESI).then(function () {
           return waitWithin(hjobs, 1800);                               // HLS çözünürlük listesi için kısa ek bekleme
         }).then(function () {
-          var streams = [], seenUrl = {};
+          var streams = [], dead = [], seenUrl = {};
           top.forEach(function (x, i) {
             var pl = res[i];
             if (!pl || !pl.links.length) { dbg.push('baglanti yok ' + x.item.id); return; }
             if (x.r.maybe) { x.r.lang = 'Dil ?'; x.r.tier = 3; }
             makeStreams(x.item, x.r, pl).forEach(function (s) {
-              if (!seenUrl[s.url]) { seenUrl[s.url] = 1; streams.push(s); }
+              if (seenUrl[s.url]) return;
+              seenUrl[s.url] = 1;
+              (s._dead ? dead : streams).push(s);
             });
           });
+          if (!streams.length) streams = dead;                          // hepsi test edilemediyse / ölüyse yine de göster (etiketli)
+          streams.forEach(function (s) { delete s._dead; });
           dbg.push('bitti ' + (Date.now() - T0) + 'ms');
           if (!streams.length) return debugStream('baglanti cikmadi');
           return streams;
