@@ -1,5 +1,5 @@
 // ============================================================
-//  vkvideo v1.1.2 — Nuvio scraper (VK Video + Yandex arama yardımı)
+//  vkyandex v1.0.0 — Nuvio scraper (VK Video + Yandex arama yardımı)
 //  Akış: TMDB (Türkçe + İngilizce ad, yıl, süre) -> VK Video araması
 //        + Yandex (web + video araması) ile VK video numaraları toplanır
 //        -> başlıkta film adı (TR veya EN) + ZORUNLU Türkçe etiket
