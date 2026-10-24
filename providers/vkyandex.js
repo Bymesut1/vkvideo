@@ -18,8 +18,8 @@ var AYAR = {
   CLIENT_SECRET: '',
   DEVICE_ID: '',
   EKLENTI_ADI: 'VK Video',   // akış kartında görünen ad
-  DEBUG_MODU: true,         // true: akış çıkmazsa nedenini yazan "DEBUG" satırları görünür
-  TANI: true,               // true: akış adının yanına test kodları (V0:403 V1:200 ...) yazılır, testi geçemeyenler de en sonda görünür
+  DEBUG_MODU: false,         // true: akış çıkmazsa nedenini yazan "DEBUG" satırları görünür
+  TANI: false,               // true: akış adının yanına test kodları (V0:403 V1:200 ...) yazılır, testi geçemeyenler de en sonda görünür
 
   MIN_SURE: 1200,            // sn: bundan kısa videolar elenir (0 = hiç eleme)
   ZORUNLU_ETIKET: true,      // true: başlıkta tr dublaj / türkçe dublaj / izle / film izle ... YOKSA video alınmaz
@@ -40,8 +40,8 @@ var AYAR = {
 
   PARALEL: 6,                // aynı anda en fazla kaç arama isteği
   ARAMA_SURESI: 8500,        // ms: arama aşaması üst sınırı
-  KAYNAK_SURESI: 7000,       // ms: video bağlantılarının çekilmesi üst sınırı
-  GENEL_SURE: 30000          // ms: dolunca o ana kadar bulunan akışlar VERİLİR (boş dönmez)
+  KAYNAK_SURESI: 15000,      // ms: video bağlantılarının çekilmesi + testi üst sınırı
+  GENEL_SURE: 38000          // ms: dolunca o ana kadar bulunan akışlar VERİLİR (boş dönmez)
 };
 
 var TMDB_KEY = '000316508321ce461cf81e7c6815eec7';
@@ -123,9 +123,14 @@ function vkHeaders(extra) {
 }
 
 // Aynı anda çok istek yavaş ağda hepsini zaman aşımına sokuyor: normal istekler sıraya girer, prio istekler girmez.
-var NET_ACTIVE = 0, NET_QUEUE = [];
+var NET_ACTIVE = 0, NET_QUEUE = [], NET_STOP = false;
+function netStop() {                                  // arama aşaması bitti: sıradaki normal istekler iptal, bağlantı istekleri rahat çalışsın
+  NET_STOP = true;
+  while (NET_QUEUE.length) NET_QUEUE.shift().r(false);
+}
 function netAcquire(prio) {
   return new Promise(function (resolve) {
+    if (!prio && NET_STOP) { resolve(false); return; }
     if (prio || NET_ACTIVE < (AYAR.PARALEL || 4)) { NET_ACTIVE++; resolve(true); return; }
     NET_QUEUE.push({ t: Date.now(), r: resolve });
   });
@@ -609,8 +614,9 @@ function qualityOf(hint, u) {
 }
 
 // Bir videonun oynatma bağlantıları: [{ hint, url, src }]
-// Kaynaklar: video.getByIds (+ video.get yedeği), getForPlay, getPlayerConfig, oynatıcı (embed) sayfası;
-// hiçbiri bağlantı vermezse: vk.com / m.vk.com sayfaları (mobil UA). Her denemenin sonucu tek "play ..." satırında özetlenir.
+// 1) VK API (getByIds / get / getForPlay / getPlayerConfig) paralel — bağlantı geldiyse embed sayfası için sadece 1,5 sn ek bekleme
+// 2) Bağlantı yoksa embed sayfası (4,5 sn), o da vermezse vk.com / m.vk.com (4 sn)
+// Embed sayfası takılsa bile API'den gelen bağlantılar BEKLEMEZ. Sonuç tek "play ..." satırında özetlenir.
 function getPlay(item) {
   var key = item.id, parts = key.split('_'), oid = parts[0] || '', vid = parts[1] || '', ak = parts[2] || '';
   var links = [], seen = {}, gotItem = false;
@@ -629,7 +635,6 @@ function getPlay(item) {
     scanUrls(node, '', list);
     list.forEach(function (p) { push(p[0], p[1], src); });
   }
-  // HTML / JS içinde nerede olursa olsun medya adreslerini bulur
   function addHtml(html, src) {
     var t = String(html || '').replace(/\\\//g, '/').replace(/\\u0026/g, '&').replace(/&quot;/g, '"').replace(/&amp;/g, '&'), m;
     var rx = /"([A-Za-z0-9_]+)"\s*:\s*"(https?:\/\/[^"\s]+)"/g;
@@ -648,8 +653,8 @@ function getPlay(item) {
       if (o.player) item.player = String(o.player);
     } else add(r, 'api');
   }
-  function embedOne(u, hdr, src) {
-    return getRaw(u, hdr, '', { prio: true, timeout: 7000 }).then(function (r) {
+  function embedOne(u, hdr, src, tmo) {
+    return getRaw(u, hdr, '', { prio: true, timeout: tmo }).then(function (r) {
       es.push((r.status || r.err || '?') + '/' + (r.text || '').length);
       if (r.ok) addHtml(r.text, src);
     });
@@ -658,34 +663,38 @@ function getPlay(item) {
     var std = AYAR.SITE + '/video_ext.php?oid=' + oid + '&id=' + vid + (ak ? '&hash=' + ak : '');
     var urls = [item.player || std];
     if (item.player && item.player !== std) urls.push(std);
-    return Promise.all(urls.map(function (u) { return embedOne(u, vkHeaders({ 'Accept': 'text/html,*/*' }), 'embed').catch(noop); }));
+    return Promise.all(urls.map(function (u) { return embedOne(u, vkHeaders({ 'Accept': 'text/html,*/*' }), 'embed', 4000).catch(noop); }));
   }
-  function fetchAlt() {                                   // son yedek: vk.com video_ext + mobil sayfa (mobil UA)
-    if (links.length) return Promise.resolve();
+  function fetchAlt() {
     var mh = pageHeaders({ 'User-Agent': ANDROID_UA, 'Accept': 'text/html,*/*', 'Referer': AYAR.SITE + '/' });
     var urls = [
       'https://vk.com/video_ext.php?oid=' + oid + '&id=' + vid + (ak ? '&hash=' + ak : ''),
-      'https://m.vk.com/video' + oid + '_' + vid + (ak ? '?access_key=' + ak : ''),
-      (item.player || (AYAR.SITE + '/video_ext.php?oid=' + oid + '&id=' + vid + (ak ? '&hash=' + ak : '')))
+      'https://m.vk.com/video' + oid + '_' + vid + (ak ? '?access_key=' + ak : '')
     ];
-    return Promise.all(urls.map(function (u) { return embedOne(u, mh, 'alt').catch(noop); }));
+    return Promise.all(urls.map(function (u) { return embedOne(u, mh, 'alt', 3500).catch(noop); }));
   }
   function err(tag) { return function (e) { errs.push(tag + ':' + String((e && e.message) || '').slice(0, 40)); }; }
+  item._diag = function () {
+    return key + ' item:' + (gotItem ? 1 : 0) + ' api:' + stat.api + ' play:' + stat.play + ' embed:' + stat.embed + ' alt:' + stat.alt +
+      ' es:' + es.join(',') + (rej.length ? ' rej:' + rej.join(',') : '') + (errs.length ? ' err:' + errs.join(',') : '');
+  };
   var playParams = { videos: key, video: key, owner_id: oid, video_id: vid, id: vid };
-  var main = api('video.getByIds', { videos: key }, true).then(fromItems, err('getByIds'))
-    .then(function () {
+  var apiJobs = [
+    api('video.getByIds', { videos: key }, true).then(fromItems, err('getByIds')).then(function () {
       if (gotItem) return null;
       return api('video.get', { videos: key }, true).then(fromItems, err('get'));
-    })
-    .then(fetchEmbed);
-  return Promise.all([
-    main,
+    }),
     api('video.getForPlay', playParams, true).then(function (r) { add(r, 'play'); }, err('forPlay')),
     api('video.getPlayerConfig', playParams, true).then(function (r) { add(r, 'play'); }, err('cfg'))
-  ]).then(fetchAlt).then(function () {
-    dbg.push('play ' + key + ' item:' + (gotItem ? 1 : 0) + ' api:' + stat.api + ' play:' + stat.play + ' embed:' + stat.embed + ' alt:' + stat.alt +
-      ' es:' + es.join(',') + (rej.length ? ' rej:' + rej.join(',') : '') + (errs.length ? ' err:' + errs.join(',') : ''));
-    return links;
+  ];
+  return new Promise(function (resolve) {
+    var fin = false;
+    function done() { if (fin) return; fin = true; dbg.push('play ' + item._diag()); resolve(links); }
+    var cap = setTimeout(done, 7000);                      // ne olursa olsun 7 sn'de o ana kadarkini ver
+    Promise.all(apiJobs).then(function () {
+      if (links.length) return waitWithin([fetchEmbed()], 1500);
+      return waitWithin([fetchEmbed()], 4500).then(function () { return links.length ? null : waitWithin([fetchAlt()], 4000); });
+    }).then(function () { clearTimeout(cap); done(); }, function () { clearTimeout(cap); done(); });
   });
 }
 
@@ -880,7 +889,8 @@ function buildVkQueries(names, year) {
 function getStreamsInner(tmdbId, mediaType, holder) {
   holder = holder || { partial: [], pu: {} };
   if (mediaType !== 'movie') return Promise.resolve([]);
-  dbg = ['vkyandex v1.0.1'];
+  dbg = ['vkyandex v1.0.2'];
+  NET_STOP = false;
   var T0 = Date.now();
   var base = 'https://api.themoviedb.org/3/movie/' + tmdbId + '?api_key=' + TMDB_KEY;
 
@@ -914,6 +924,7 @@ function getStreamsInner(tmdbId, mediaType, holder) {
     if (AYAR.YANDEX) jobs.push(yandexRun(yandexQueries(names, year), engSink));
 
     return waitWithin(jobs, AYAR.ARAMA_SURESI).then(function () {
+      netStop();
       var seen = {}, all = [];
       sinks.forEach(function (l) {
         l.forEach(function (it) { var b = baseKey(it.id); if (!seen[b]) { seen[b] = 1; all.push(it); } });
@@ -941,7 +952,7 @@ function getStreamsInner(tmdbId, mediaType, holder) {
         var lim = cands.slice(0, AYAR.YANDEX_ADAY), chunks = [], i;
         for (i = 0; i < lim.length; i += 10) chunks.push(lim.slice(i, i + 10));
         return waitWithin(chunks.map(function (ch) {
-          return api('video.getByIds', { videos: ch.map(function (c) { return c.vid; }).join(',') }, false).then(function (r) {
+          return api('video.getByIds', { videos: ch.map(function (c) { return c.vid; }).join(',') }, true).then(function (r) {
             var acc = newAcc();
             collectVideos(r, acc);
             acc.list.forEach(function (o) {
@@ -983,7 +994,7 @@ function getStreamsInner(tmdbId, mediaType, holder) {
           var streams = [], dead = [], seenUrl = {};
           top.forEach(function (x, i) {
             var pl = res[i];
-            if (!pl || !pl.links.length) { dbg.push('baglanti yok ' + x.item.id); return; }
+            if (!pl || !pl.links.length) { dbg.push('baglanti yok ' + x.item.id + (pl ? '' : ' (bitmedi) ' + (x.item._diag ? x.item._diag() : ''))); return; }
             makeStreams(x.item, x.r, pl).forEach(function (s) {
               if (seenUrl[s.url]) return;
               seenUrl[s.url] = 1;
