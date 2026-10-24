@@ -1,12 +1,12 @@
 {
   "name": "Bymesut1 Nuvio Providers",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "scrapers": [
     {
       "id": "vkyandex",
       "name": "VK Video (Yandex)",
       "description": "VK Video + Yandex aramasıyla Türkçe dublajlı filmler. Film adı (TR/EN) + tr dublaj / Türkçe dublaj / izle etiketi zorunlu; yıl ve süre ile TMDB filmine eşleşir.",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "author": "Bymesut1",
       "supportedTypes": [
         "movie"
