@@ -1,5 +1,5 @@
 // ============================================================
-//  vkvideo v1.1.0 — Nuvio scraper (vkvideo.ru, kullanıcı / kanal / topluluk yüklemeleri)
+//  vkvideo v1.1.1 — Nuvio scraper (vkvideo.ru, kullanıcı / kanal / topluluk yüklemeleri)
 //  Akış: TMDB bilgisi -> VK Video araması (sayfalı) + arama motorları (Google / Yandex / Bing ...)
 //        + kanal / topluluk video listeleri -> aday eleme/puanlama (okru / mailru ile aynı)
 //        -> video bağlantıları (mp4 / HLS / DASH)
@@ -25,6 +25,7 @@ var AYAR = {
   MAX_SORGU: 12,        // VK Video'da en fazla kaç arama yapılsın (öncelik sırasıyla: "ad Türkçe Dublaj", "ad TR Dublaj", ...)
   SORGU_SAYFA: 3,       // her aramada sitedeki gibi aşağı indikçe en fazla kaç sayfa (sayfa başı ~30 video) okunsun
   ONEKLER: [],
+  TANI: false,          // true: akış adının yanına test kodları yazılır (V0:403 V1:200 ...) ve testi geçemeyen bağlantılar da en sona eklenir. Sorun bulununca false yap.
   DOGRULA: true,        // bağlantı gerçekten açılıyor mu denenir; oynatıcıya hangi başlıkların (UA/Referer/Origin) kabul edildiği verilir, ölü mp4'ler sona atılır
   SURE_PARMAK_IZ: true, // hiçbir aday adla eşleşmediyse: süresi TMDB süresiyle ±%1.2 tutan, Türkçe dublaj etiketli TEK video varsa o eklenir ("TR Süre")
   // Arama motorları (Google / Yandex / Yandex Video / Bing / DuckDuckGo ...): "rambo tr vkvideo.ru" tarzı aramalardan VK video numaraları toplanır
@@ -801,27 +802,71 @@ function probeState(r, isHls) {                      // 1 = çalışıyor, -1 = 
   return -1;
 }
 
-// Bağlantıyı gerçekten dener (Range ile 2 bayt): hangi başlık takımı kabul ediliyor, mp4 ölü mü?
+// Adreste srcAg=CHROME_LINUX gibi bir değer varsa adres o tarayıcı kimliğine bağlıdır: önce ona uyan UA denenir
+function uaForUrl(u) {
+  var m = String(u || '').match(/[?&]srcAg=([^&]+)/);
+  if (!m) return '';
+  var a = String(m[1]).toUpperCase();
+  if (/ANDROID|MOBILE/.test(a)) return ANDROID_UA;
+  if (/WINDOWS/.test(a)) return UA_ENGINE;
+  if (/LINUX/.test(a)) return UA_VK;
+  return '';
+}
+function hdrList(url) {
+  var list = [], ua = uaForUrl(url), seenH = {};
+  function add(h) { var k = JSON.stringify(h); if (seenH[k]) return; seenH[k] = 1; list.push(h); }
+  if (ua) {
+    add({ 'User-Agent': ua, 'Referer': AYAR.SITE + '/', 'Origin': AYAR.SITE });
+    add({ 'User-Agent': ua });
+  }
+  HDR_VARIANTS.forEach(function (mk) { add(mk()); });
+  add({ 'User-Agent': UA_VK, 'Referer': AYAR.SITE + '/' });
+  add({ 'User-Agent': ANDROID_UA });
+  return list;
+}
+
+// Her bağlantı ayrı denenir: önce ilk 3 başlık takımı, hiçbiri tutmazsa kalanlar. Kabul edilen takım l.headers, kesin ölü ise l.dead
+function probeLink(l) {
+  var isH = !isMp4Link(l), hv = hdrList(l.url);
+  function one(i) {
+    var ph = {};
+    Object.keys(hv[i]).forEach(function (k) { ph[k] = hv[i][k]; });
+    if (!isH) ph['Range'] = 'bytes=0-1';
+    return getRaw(l.url, ph, '', { timeout: 4000, prio: true, noBody: !isH }).then(function (r) {
+      return { i: i, v: probeState(r, isH), st: r.status || r.err || '?' };
+    });
+  }
+  function wave(from, to) {
+    var idx = [];
+    for (var i = from; i < Math.min(to, hv.length); i++) idx.push(i);
+    return Promise.all(idx.map(one));
+  }
+  function good(rs) { return rs.some(function (x) { return x.v === 1; }); }
+  return wave(0, 3).then(function (a) {
+    return good(a) ? a : wave(3, hv.length).then(function (b) { return a.concat(b); });
+  }).then(function (rs) {
+    var okR = null, unknown = false;
+    rs.forEach(function (x) { if (x.v === 1 && !okR) okR = x; if (x.v === 0) unknown = true; });
+    l.diag = rs.map(function (x) { return 'V' + x.i + ':' + x.st; }).join(' ');
+    if (okR) l.headers = hv[okR.i];
+    else if (!unknown) l.dead = true;
+    return l;
+  }, function () { return l; });
+}
+
+// Bağlantıları gerçekten dener (mp4: Range ile 2 bayt, HLS: ana liste): hangi başlık takımı kabul ediliyor, hangisi ölü?
 function verifyItem(item, links) {
   var pl = { links: links, hlsVars: [], headers: HDR_VARIANTS[0](), mp4Dead: false };
   if (!AYAR.DOGRULA || !links.length) return Promise.resolve(pl);
-  var mp4 = links.filter(isMp4Link)[0] || null;
-  var target = mp4 || links.filter(isHlsLink)[0] || null;
-  if (!target) return Promise.resolve(pl);
-  var isH = !mp4;
-  var tests = HDR_VARIANTS.map(function (mk, i) {
-    var ph = mk();
-    if (!isH) ph['Range'] = 'bytes=0-1';
-    return getRaw(target.url, ph, '', { timeout: 4000, prio: true, noBody: !isH }).then(function (r) {
-      return { i: i, v: probeState(r, isH), st: r.status || r.err || '?' };
-    });
-  });
-  return Promise.all(tests).then(function (rs) {
-    var okR = null, unknown = false;
-    rs.forEach(function (x) { if (x.v === 1 && !okR) okR = x; if (x.v === 0) unknown = true; });
-    dbg.push('probe ' + item.id + ' ' + (isH ? 'hls' : 'mp4') + ' ' + rs.map(function (x) { return 'V' + x.i + ':' + x.st; }).join(' '));
-    if (okR) pl.headers = HDR_VARIANTS[okR.i]();
-    else if (!unknown && !isH) pl.mp4Dead = true;
+  var targets = links.filter(isMp4Link).slice(0, 4).concat(links.filter(isHlsLink).slice(0, 1));
+  if (!targets.length) return Promise.resolve(pl);
+  return Promise.all(targets.map(probeLink)).then(function () {
+    var okL = null;
+    targets.forEach(function (l) { if (!l.dead && l.headers && !okL) okL = l; });
+    if (!okL) targets.forEach(function (l) { if (!l.dead && !okL) okL = l; });
+    if (okL && okL.headers) pl.headers = okL.headers;
+    pl.mp4Dead = !okL && targets.some(function (l) { return l.dead; });
+    dbg.push('probe ' + item.id + ' ' + targets.map(function (l) { return (isMp4Link(l) ? 'mp4' : 'hls') + ':' + (l.diag || '?'); }).join(' | '));
     return pl;
   });
 }
@@ -846,19 +891,25 @@ function makeStreams(item, ranked, pl) {
     var u = l.url, hint = String(l.hint || '');
     if (seen[u]) return;
     seen[u] = 1;
+    var hdr = l.headers || headers;
+    var dg = (AYAR.TANI && l.diag) ? ' [' + l.diag + ']' : '';
+    var bad = l.dead ? ' (test başarısız)' : '';
+    var s;
     if (isHlsLink(l)) {
-      extras.push({ name: AYAR.EKLENTI_ADI + ' - ' + ranked.lang + ' HLS', title: lbl('HLS Auto'), url: u, quality: 'Auto', headers: headers, provider: PROVIDER_ID });
+      s = { name: AYAR.EKLENTI_ADI + ' - ' + ranked.lang + ' HLS' + dg, title: lbl('HLS Auto' + bad), url: u, quality: 'Auto', headers: hdr, provider: PROVIDER_ID };
+      if (l.dead) s._dead = true;
+      extras.push(s);
       return;
     }
     if (isDashLink(l)) {
-      extras.push({ name: AYAR.EKLENTI_ADI + ' - ' + ranked.lang + ' DASH', title: lbl('DASH Auto'), url: u, quality: 'Auto', headers: headers, provider: PROVIDER_ID });
+      extras.push({ name: AYAR.EKLENTI_ADI + ' - ' + ranked.lang + ' DASH', title: lbl('DASH Auto'), url: u, quality: 'Auto', headers: hdr, provider: PROVIDER_ID });
       return;
     }
     var q = qualityOf(hint, u), key = q ? q + 'p' : 'Auto';
     var tag = (q && mp4h[q]) ? ' #2' : '';
     if (q) mp4h[q] = (mp4h[q] || 0) + 1;
-    var s = { name: AYAR.EKLENTI_ADI + ' - ' + ranked.lang + ' ' + key + tag, title: lbl(key + tag + (pl.mp4Dead ? ' (test başarısız)' : '')), url: u, quality: key, type: 'mp4', headers: headers, provider: PROVIDER_ID };
-    if (pl.mp4Dead) s._dead = true;
+    s = { name: AYAR.EKLENTI_ADI + ' - ' + ranked.lang + ' ' + key + tag + dg, title: lbl(key + tag + bad), url: u, quality: key, type: 'mp4', headers: hdr, provider: PROVIDER_ID };
+    if (l.dead) s._dead = true;
     mp4.push(s);
   });
   // HLS ana listesindeki (mp4 olarak verilmeyen) çözünürlükler: 1080p ve altı hepsi
@@ -866,7 +917,7 @@ function makeStreams(item, ranked, pl) {
     if (!v.h || mp4h[v.h] || seen[v.url]) return;
     seen[v.url] = 1;
     mp4h[v.h] = 1;
-    mp4.push({ name: AYAR.EKLENTI_ADI + ' - ' + ranked.lang + ' ' + v.h + 'p', title: lbl(v.h + 'p HLS'), url: v.url, quality: v.h + 'p', headers: headers, provider: PROVIDER_ID });
+    mp4.push({ name: AYAR.EKLENTI_ADI + ' - ' + ranked.lang + ' ' + v.h + 'p', title: lbl(v.h + 'p HLS'), url: v.url, quality: v.h + 'p', headers: pl.hlsHdr || headers, provider: PROVIDER_ID });
   });
   mp4.sort(function (a, b) { return heightOf(b.quality) - heightOf(a.quality); });
   return mp4.concat(extras);
@@ -1745,12 +1796,15 @@ function getStreamsInner(tmdbId, mediaType, holder) {
             res[i] = pl;
             if (!x.r.maybe && !pl.mp4Dead) {                            // ilk hazır kaynaklar: süre dolarsa en azından bunlar verilsin
               try {
-                makeStreams(x.item, x.r, pl).forEach(function (s) { if (!holder.pu[s.url]) { holder.pu[s.url] = 1; holder.partial.push(s); } });
+                makeStreams(x.item, x.r, pl).forEach(function (s) { if (!s._dead && !holder.pu[s.url]) { holder.pu[s.url] = 1; holder.partial.push(s); } });
               } catch (e) {}
             }
             var hl = null;
-            pl.links.forEach(function (l) { if (!hl && isHlsLink(l)) hl = l; });
-            if (hl) hjobs.push(expandHls(hl.url, pl.headers).then(function (v) { pl.hlsVars = v; }, noop));
+            pl.links.forEach(function (l) { if (!hl && isHlsLink(l) && !l.dead) hl = l; });
+            if (hl) {
+              pl.hlsHdr = hl.headers || pl.headers;
+              hjobs.push(expandHls(hl.url, pl.hlsHdr).then(function (v) { pl.hlsVars = v; }, noop));
+            }
           }, function (e) { dbg.push('play hata ' + x.item.id + ' ' + ((e && e.message) || '')); });
         });
         return waitWithin(ljobs, AYAR.KAYNAK_SURESI).then(function () {
@@ -1767,7 +1821,7 @@ function getStreamsInner(tmdbId, mediaType, holder) {
               (s._dead ? dead : streams).push(s);
             });
           });
-          if (!streams.length) streams = dead;                          // hepsi test edilemediyse / ölüyse yine de göster (etiketli)
+          if (AYAR.TANI) streams = streams.concat(dead);                // tanı modu: testi geçemeyenler de en sonda görünsün (kodlarıyla)
           streams.forEach(function (s) { delete s._dead; });
           dbg.push('bitti ' + (Date.now() - T0) + 'ms');
           if (!streams.length) return debugStream('baglanti cikmadi');
