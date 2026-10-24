@@ -18,7 +18,7 @@ var AYAR = {
   CLIENT_SECRET: '',
   DEVICE_ID: '',
   EKLENTI_ADI: 'VK Video',   // akış kartında görünen ad
-  DEBUG_MODU: false,         // true: akış çıkmazsa nedenini yazan "DEBUG" satırları görünür
+  DEBUG_MODU: true,         // true: akış çıkmazsa nedenini yazan "DEBUG" satırları görünür
   TANI: false,               // true: akış adının yanına test kodları (V0:403 V1:200 ...) yazılır, testi geçemeyenler de en sonda görünür
 
   MIN_SURE: 1200,            // sn: bundan kısa videolar elenir (0 = hiç eleme)
