@@ -1,5 +1,5 @@
 // ============================================================
-//  vkyandex v1.0.0 — Nuvio scraper (VK Video + Yandex arama yardımı)
+//  vkyandex v1.0.1 — Nuvio scraper (VK Video + Yandex arama yardımı)
 //  Akış: TMDB (Türkçe + İngilizce ad, yıl, süre) -> VK Video araması
 //        + Yandex (web + video araması) ile VK video numaraları toplanır
 //        -> başlıkta film adı (TR veya EN) + ZORUNLU Türkçe etiket
@@ -18,7 +18,7 @@ var AYAR = {
   CLIENT_SECRET: '',
   DEVICE_ID: '',
   EKLENTI_ADI: 'VK Video',   // akış kartında görünen ad
-  DEBUG_MODU: true,         // true: akış çıkmazsa nedenini yazan "DEBUG" satırları görünür
+  DEBUG_MODU: false,         // true: akış çıkmazsa nedenini yazan "DEBUG" satırları görünür
   TANI: false,               // true: akış adının yanına test kodları (V0:403 V1:200 ...) yazılır, testi geçemeyenler de en sonda görünür
 
   MIN_SURE: 1200,            // sn: bundan kısa videolar elenir (0 = hiç eleme)
@@ -363,7 +363,7 @@ function yandexQueries(names, year) {
 function yandexRun(queries, sink) {
   var tasks = [];
   queries.forEach(function (q, qi) {
-    yandexUrls(q, qi).forEach(function (u, ui) { tasks.push({ u: u, lbl: AYAR.DEBUG_MODU ? 'Y' + (qi + 1) + '.' + ui : '' }); });
+    yandexUrls(q, qi).forEach(function (u, ui) { tasks.push({ u: u, lbl: '' }); });
   });
   var idx = 0, active = 0, captcha = 0, deadline = Date.now() + AYAR.YANDEX_SURE;
   return new Promise(function (resolve) {
@@ -608,17 +608,34 @@ function qualityOf(hint, u) {
   return 0;
 }
 
-// Bir videonun oynatma bağlantıları: [{ hint, url, src }] — video.getByIds + getForPlay + getPlayerConfig + embed sayfası birleşir
+// Bir videonun oynatma bağlantıları: [{ hint, url, src }]
+// Kaynaklar: video.getByIds (+ video.get yedeği), getForPlay, getPlayerConfig, oynatıcı (embed) sayfası;
+// hiçbiri bağlantı vermezse: vk.com / m.vk.com sayfaları (mobil UA). Her denemenin sonucu tek "play ..." satırında özetlenir.
 function getPlay(item) {
   var key = item.id, parts = key.split('_'), oid = parts[0] || '', vid = parts[1] || '', ak = parts[2] || '';
   var links = [], seen = {}, gotItem = false;
+  var stat = { api: 0, play: 0, embed: 0, alt: 0 }, rej = [], errs = [], es = [];
+  function reject(u) {
+    var h = (String(u).match(/^https?:\/\/([^\/?#]+)/i) || [])[1] || '';
+    if (h && !isImage(u) && /\.(m3u8|mp4|mpd)|okcdn|mycdn|vkuservideo|vkvd/i.test(u) && rej.indexOf(h) === -1 && rej.length < 4) rej.push(h.slice(0, 24));
+  }
+  function push(hint, u, src) {
+    var cu = cleanUrl(u);
+    if (seen[cu]) return;
+    if (isMedia(cu)) { seen[cu] = 1; links.push({ hint: hint, url: cu, src: src }); stat[src]++; } else reject(cu);
+  }
   function add(node, src) {
     var list = [];
     scanUrls(node, '', list);
-    list.forEach(function (p) {
-      var u = cleanUrl(p[1]);
-      if (isMedia(u) && !seen[u]) { seen[u] = 1; links.push({ hint: p[0], url: u, src: src }); }
-    });
+    list.forEach(function (p) { push(p[0], p[1], src); });
+  }
+  // HTML / JS içinde nerede olursa olsun medya adreslerini bulur
+  function addHtml(html, src) {
+    var t = String(html || '').replace(/\\\//g, '/').replace(/\\u0026/g, '&').replace(/&quot;/g, '"').replace(/&amp;/g, '&'), m;
+    var rx = /"([A-Za-z0-9_]+)"\s*:\s*"(https?:\/\/[^"\s]+)"/g;
+    while ((m = rx.exec(t)) !== null) push(m[1], m[2], src);
+    var rx2 = /https?:\/\/[^\s"'<>\\]+/g;
+    while ((m = rx2.exec(t)) !== null) push('', m[0], src);
   }
   function fromItems(r) {
     var acc = newAcc();
@@ -631,33 +648,45 @@ function getPlay(item) {
       if (o.player) item.player = String(o.player);
     } else add(r, 'api');
   }
-  function embedOne(u) {
-    return getRaw(u, vkHeaders({ 'Accept': 'text/html,*/*' }), '', { prio: true, timeout: 7000 }).then(function (r) {
-      var rx = /"(hls[a-z_]*|dash_[a-z_]+|url\d+|mp4_\d+)"\s*:\s*"(https?:[^"]+)"/g, m;
-      while (r.ok && (m = rx.exec(r.text)) !== null) {
-        var cu = cleanUrl(m[2]);
-        if (isMedia(cu) && !seen[cu]) { seen[cu] = 1; links.push({ hint: m[1], url: cu, src: 'embed' }); }
-      }
+  function embedOne(u, hdr, src) {
+    return getRaw(u, hdr, '', { prio: true, timeout: 7000 }).then(function (r) {
+      es.push((r.status || r.err || '?') + '/' + (r.text || '').length);
+      if (r.ok) addHtml(r.text, src);
     });
   }
   function fetchEmbed() {
     var std = AYAR.SITE + '/video_ext.php?oid=' + oid + '&id=' + vid + (ak ? '&hash=' + ak : '');
     var urls = [item.player || std];
     if (item.player && item.player !== std) urls.push(std);
-    return Promise.all(urls.map(function (u) { return embedOne(u).catch(noop); }));
+    return Promise.all(urls.map(function (u) { return embedOne(u, vkHeaders({ 'Accept': 'text/html,*/*' }), 'embed').catch(noop); }));
   }
+  function fetchAlt() {                                   // son yedek: vk.com video_ext + mobil sayfa (mobil UA)
+    if (links.length) return Promise.resolve();
+    var mh = pageHeaders({ 'User-Agent': ANDROID_UA, 'Accept': 'text/html,*/*', 'Referer': AYAR.SITE + '/' });
+    var urls = [
+      'https://vk.com/video_ext.php?oid=' + oid + '&id=' + vid + (ak ? '&hash=' + ak : ''),
+      'https://m.vk.com/video' + oid + '_' + vid + (ak ? '?access_key=' + ak : ''),
+      (item.player || (AYAR.SITE + '/video_ext.php?oid=' + oid + '&id=' + vid + (ak ? '&hash=' + ak : '')))
+    ];
+    return Promise.all(urls.map(function (u) { return embedOne(u, mh, 'alt').catch(noop); }));
+  }
+  function err(tag) { return function (e) { errs.push(tag + ':' + String((e && e.message) || '').slice(0, 40)); }; }
   var playParams = { videos: key, video: key, owner_id: oid, video_id: vid, id: vid };
-  var main = api('video.getByIds', { videos: key }, true).then(fromItems, function (e) { dbg.push('getByIds ' + key + ' ' + ((e && e.message) || '')); })
+  var main = api('video.getByIds', { videos: key }, true).then(fromItems, err('getByIds'))
     .then(function () {
       if (gotItem) return null;
-      return api('video.get', { videos: key }, true).then(fromItems, function (e) { dbg.push('video.get ' + key + ' ' + ((e && e.message) || '')); });
+      return api('video.get', { videos: key }, true).then(fromItems, err('get'));
     })
     .then(fetchEmbed);
   return Promise.all([
     main,
-    api('video.getForPlay', playParams, true).then(function (r) { add(r, 'play'); }, function (e) { dbg.push('getForPlay ' + ((e && e.message) || '')); }),
-    api('video.getPlayerConfig', playParams, true).then(function (r) { add(r, 'play'); }, function (e) { dbg.push('getPlayerConfig ' + ((e && e.message) || '')); })
-  ]).then(function () { return links; });
+    api('video.getForPlay', playParams, true).then(function (r) { add(r, 'play'); }, err('forPlay')),
+    api('video.getPlayerConfig', playParams, true).then(function (r) { add(r, 'play'); }, err('cfg'))
+  ]).then(fetchAlt).then(function () {
+    dbg.push('play ' + key + ' item:' + (gotItem ? 1 : 0) + ' api:' + stat.api + ' play:' + stat.play + ' embed:' + stat.embed + ' alt:' + stat.alt +
+      ' es:' + es.join(',') + (rej.length ? ' rej:' + rej.join(',') : '') + (errs.length ? ' err:' + errs.join(',') : ''));
+    return links;
+  });
 }
 
 function isHlsLink(l) { return l.url.indexOf('.m3u8') > -1 || /hls/i.test(String(l.hint || '')); }
@@ -851,7 +880,7 @@ function buildVkQueries(names, year) {
 function getStreamsInner(tmdbId, mediaType, holder) {
   holder = holder || { partial: [], pu: {} };
   if (mediaType !== 'movie') return Promise.resolve([]);
-  dbg = ['vkyandex v1.0.0'];
+  dbg = ['vkyandex v1.0.1'];
   var T0 = Date.now();
   var base = 'https://api.themoviedb.org/3/movie/' + tmdbId + '?api_key=' + TMDB_KEY;
 
@@ -917,6 +946,9 @@ function getStreamsInner(tmdbId, mediaType, holder) {
             collectVideos(r, acc);
             acc.list.forEach(function (o) {
               var it = toItem(o, 'yandex'), b = baseKey(it.id);
+              if (it.id.split('_').length < 3) {                       // API erişim anahtarı vermediyse Yandex adresindeki hash'i kullan
+                ch.forEach(function (c) { if (c.key === b && c.vid.split('_').length > 2) it.id = c.vid; });
+              }
               if (!seen[b]) { seen[b] = 1; all.push(it); }
             });
           }, function (e) { dbg.push('yandex dogrulama ' + ((e && e.message) || '')); });
