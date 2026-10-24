@@ -1,5 +1,5 @@
 // ============================================================
-//  vkyandex v1.0.1 — Nuvio scraper (VK Video + Yandex arama yardımı)
+//  vkyandex v1.0.2 — Nuvio scraper (VK Video + Yandex arama yardımı)
 //  Akış: TMDB (Türkçe + İngilizce ad, yıl, süre) -> VK Video araması
 //        + Yandex (web + video araması) ile VK video numaraları toplanır
 //        -> başlıkta film adı (TR veya EN) + ZORUNLU Türkçe etiket
@@ -19,7 +19,7 @@ var AYAR = {
   DEVICE_ID: '',
   EKLENTI_ADI: 'VK Video',   // akış kartında görünen ad
   DEBUG_MODU: true,         // true: akış çıkmazsa nedenini yazan "DEBUG" satırları görünür
-  TANI: false,               // true: akış adının yanına test kodları (V0:403 V1:200 ...) yazılır, testi geçemeyenler de en sonda görünür
+  TANI: true,               // true: akış adının yanına test kodları (V0:403 V1:200 ...) yazılır, testi geçemeyenler de en sonda görünür
 
   MIN_SURE: 1200,            // sn: bundan kısa videolar elenir (0 = hiç eleme)
   ZORUNLU_ETIKET: true,      // true: başlıkta tr dublaj / türkçe dublaj / izle / film izle ... YOKSA video alınmaz
