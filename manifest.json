@@ -1,0 +1,17 @@
+{
+  "name": "vkvideo",
+  "version": "1.0.0",
+  "scrapers": [
+    {
+      "id": "vkvideo",
+      "name": "vkvideo",
+      "description": "vkvideo.ru videoları, sadece Türkçe ses (TR / Türkçe Dublaj)",
+      "version": "1.0.0",
+      "filename": "providers/vkvideo.js",
+      "supportedTypes": [
+        "movie"
+      ],
+      "enabled": true
+    }
+  ]
+}
